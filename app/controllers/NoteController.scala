@@ -2,11 +2,6 @@ package controllers
 
 import play.api.mvc._
 import javax.inject._
-import akka.actor.ActorSystem                      // classic ActorSystem injected by Play/Guice
-import akka.actor.typed.scaladsl.adapter._         // adapter to convert classic -> typed
-import akka.actor.typed.scaladsl.AskPattern._
-import akka.actor.typed.Scheduler
-import akka.util.Timeout
 import scala.concurrent.duration._
 import scala.concurrent.ExecutionContext
 import models._
@@ -16,6 +11,15 @@ import services.NoteService
 import daos.NoteDao
 import com.datastax.oss.driver.api.core.CqlSession
 import play.api.libs.json._
+import java.time.Instant
+import java.util.UUID
+
+// Pekko imports (replacing akka.*)
+import org.apache.pekko.actor.ActorSystem                      // classic ActorSystem injected by Play/Guice
+import org.apache.pekko.actor.typed.scaladsl.adapter._         // adapter to convert classic -> typed
+import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+import org.apache.pekko.actor.typed.Scheduler
+import org.apache.pekko.util.Timeout
 
 @Singleton
 class NoteController @Inject()(
@@ -24,7 +28,7 @@ class NoteController @Inject()(
 )(implicit ec: ExecutionContext) extends AbstractController(cc) {
 
   // convert classic to typed
-  private val typedSystem: akka.actor.typed.ActorSystem[Nothing] = actorSystem.toTyped
+  private val typedSystem: org.apache.pekko.actor.typed.ActorSystem[Nothing] = actorSystem.toTyped
 
   // Cassandra session setup
   private val session: CqlSession = CqlSession.builder()
@@ -46,21 +50,51 @@ class NoteController @Inject()(
   implicit val timeout: Timeout = 5.seconds
   implicit val noteFormat: OFormat[Note] = Json.format[Note]
 
+  // Helper: convert Option[String] to JsValue (JsString or JsNull)
+  private def optJs(s: Option[String]): JsValue = s.map(JsString).getOrElse(JsNull)
+
+  // Helper to produce the API envelope
+  private def apiEnvelope(
+      result: JsValue,
+      responseCode: String = "OK",
+      status: String = "successful",
+      err: Option[String] = None,
+      errmsg: Option[String] = None,
+      msgid: Option[String] = None,
+      id: String = "api.notes-service.notes",
+      ver: String = "1.0"
+  ): JsValue = {
+    Json.obj(
+      "id" -> id,
+      "ver" -> ver,
+      "ts" -> Instant.now().toString,
+      "params" -> Json.obj(
+        "resmsgid" -> JsString(UUID.randomUUID().toString),
+        "msgid"     -> JsString(msgid.getOrElse(UUID.randomUUID().toString)),
+        "err"       -> optJs(err),
+        "status"    -> JsString(status),
+        "errmsg"    -> optJs(errmsg)
+      ),
+      "responseCode" -> responseCode,
+      "result" -> result
+    )
+  }
+
   /** Create a note */
   def createNote(): Action[JsValue] = Action.async(parse.json) { request =>
     val note = request.body.as[Note]
     noteActor.ask[Response](ref => CreateNoteRequest(note, ref)).map {
       case Response("success", Some(data: Note)) =>
-        Ok(Json.obj("status" -> "success", "data" -> Json.toJson(data)))
+        Ok(apiEnvelope(Json.obj("note" -> Json.toJson(data)), responseCode = "OK"))
 
       case Response("error", Some(msg: String)) =>
-        BadRequest(Json.obj("error" -> msg))
+        BadRequest(apiEnvelope(Json.obj(), responseCode = "CLIENT_ERROR", status = "failed", err = Some("BadRequest"), errmsg = Some(msg)))
 
       case Response("error", None) =>
-        BadRequest(Json.obj("error" -> "Unknown error"))
+        BadRequest(apiEnvelope(Json.obj(), responseCode = "CLIENT_ERROR", status = "failed", err = Some("BadRequest"), errmsg = Some("Unknown error")))
 
       case _ =>
-        InternalServerError(Json.obj("error" -> "Unexpected response"))
+        InternalServerError(apiEnvelope(Json.obj(), responseCode = "SERVER_ERROR", status = "failed", err = Some("InternalServerError"), errmsg = Some("Unexpected response")))
     }
   }
 
@@ -70,16 +104,16 @@ class NoteController @Inject()(
       // Accept any Seq at runtime, then filter/cast elements to Note so Play finds the Writes[Note] -> Writes[Seq[Note]]
       case Response("success", Some(data: Seq[_])) =>
         val notes: Seq[Note] = data.collect { case n: Note => n }
-        Ok(Json.obj("status" -> "success", "data" -> Json.toJson(notes)))
+        Ok(apiEnvelope(Json.obj("notes" -> Json.toJson(notes)), responseCode = "OK"))
 
       case Response("error", Some(msg: String)) =>
-        BadRequest(Json.obj("error" -> msg))
+        BadRequest(apiEnvelope(Json.obj(), responseCode = "CLIENT_ERROR", status = "failed", err = Some("BadRequest"), errmsg = Some(msg)))
 
       case Response("error", None) =>
-        BadRequest(Json.obj("error" -> "Unknown error"))
+        BadRequest(apiEnvelope(Json.obj(), responseCode = "CLIENT_ERROR", status = "failed", err = Some("BadRequest"), errmsg = Some("Unknown error")))
 
       case _ =>
-        InternalServerError(Json.obj("error" -> "Unexpected response"))
+        InternalServerError(apiEnvelope(Json.obj(), responseCode = "SERVER_ERROR", status = "failed", err = Some("InternalServerError"), errmsg = Some("Unexpected response")))
     }
   }
 
@@ -88,20 +122,25 @@ class NoteController @Inject()(
     val note = request.body.as[Note]
     // Ensure noteId in path is set on returned object
     noteService.updateNote(noteId, note).map {
-      case Some(updated) => Ok(Json.obj("status" -> "success", "data" -> Json.toJson(updated)))
-      case None => NotFound(Json.obj("error" -> "Note not found"))
+      case Some(updated) =>
+        Ok(apiEnvelope(Json.obj("note" -> Json.toJson(updated)), responseCode = "OK"))
+      case None =>
+        NotFound(apiEnvelope(Json.obj(), responseCode = "NOT_FOUND", status = "failed", err = Some("NotFound"), errmsg = Some("Note not found")))
     } recover {
       case ex =>
-        InternalServerError(Json.obj("error" -> ex.getMessage))
+        InternalServerError(apiEnvelope(Json.obj(), responseCode = "SERVER_ERROR", status = "failed", err = Some("InternalServerError"), errmsg = Some(ex.getMessage)))
     }
   }
 
   /** Delete a note by ID */
   def deleteNote(noteId: String): Action[AnyContent] = Action.async {
     noteService.deleteNote(noteId).map { success =>
-      if (success) Ok(Json.obj("status" -> "success")) else InternalServerError(Json.obj("error" -> "Delete failed"))
+      if (success)
+        Ok(apiEnvelope(Json.obj("deleted" -> true, "noteId" -> noteId), responseCode = "OK"))
+      else
+        InternalServerError(apiEnvelope(Json.obj(), responseCode = "SERVER_ERROR", status = "failed", err = Some("InternalServerError"), errmsg = Some("Delete failed")))
     } recover {
-      case ex => InternalServerError(Json.obj("error" -> ex.getMessage))
+      case ex => InternalServerError(apiEnvelope(Json.obj(), responseCode = "SERVER_ERROR", status = "failed", err = Some("InternalServerError"), errmsg = Some(ex.getMessage)))
     }
   }
 }
