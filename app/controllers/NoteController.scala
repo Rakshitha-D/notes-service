@@ -14,9 +14,8 @@ import play.api.libs.json._
 import java.time.Instant
 import java.util.UUID
 
-// Pekko imports (replacing akka.*)
-import org.apache.pekko.actor.ActorSystem                      // classic ActorSystem injected by Play/Guice
-import org.apache.pekko.actor.typed.scaladsl.adapter._         // adapter to convert classic -> typed
+import org.apache.pekko.actor.ActorSystem
+import org.apache.pekko.actor.typed.scaladsl.adapter._
 import org.apache.pekko.actor.typed.scaladsl.AskPattern._
 import org.apache.pekko.actor.typed.Scheduler
 import org.apache.pekko.util.Timeout
@@ -24,36 +23,29 @@ import org.apache.pekko.util.Timeout
 @Singleton
 class NoteController @Inject()(
     cc: ControllerComponents,
-    actorSystem: ActorSystem                       // classic ActorSystem here
+    actorSystem: ActorSystem
 )(implicit ec: ExecutionContext) extends AbstractController(cc) {
 
-  // convert classic to typed
   private val typedSystem: org.apache.pekko.actor.typed.ActorSystem[Nothing] = actorSystem.toTyped
 
-  // Cassandra session setup
   private val session: CqlSession = CqlSession.builder()
     .withKeyspace("notes_ks")
     .build()
 
-  // Single DAO and Service instances reused by controller and actor
   private val noteDao = new NoteDao(session)
   private val noteService = new NoteService(noteDao)
 
-  // Actor initialization (use the typed system)
   private val noteActor = typedSystem.systemActorOf(
     NoteActor(noteService),
     "note-actor"
   )
 
-  // Required implicits
   implicit val scheduler: Scheduler = typedSystem.scheduler
   implicit val timeout: Timeout = 5.seconds
   implicit val noteFormat: OFormat[Note] = Json.format[Note]
 
-  // Helper: convert Option[String] to JsValue (JsString or JsNull)
   private def optJs(s: Option[String]): JsValue = s.map(JsString).getOrElse(JsNull)
 
-  // Helper to produce the API envelope
   private def apiEnvelope(
       result: JsValue,
       responseCode: String = "OK",
@@ -80,7 +72,6 @@ class NoteController @Inject()(
     )
   }
 
-  /** Create a note */
   def createNote(): Action[JsValue] = Action.async(parse.json) { request =>
     val note = request.body.as[Note]
     noteActor.ask[Response](ref => CreateNoteRequest(note, ref)).map {
@@ -98,10 +89,8 @@ class NoteController @Inject()(
     }
   }
 
-  /** Get notes by course ID */
   def getNotes(courseId: String): Action[AnyContent] = Action.async {
     noteActor.ask[Response](ref => GetNotesByCourse(courseId, ref)).map {
-      // Accept any Seq at runtime, then filter/cast elements to Note so Play finds the Writes[Note] -> Writes[Seq[Note]]
       case Response("success", Some(data: Seq[_])) =>
         val notes: Seq[Note] = data.collect { case n: Note => n }
         Ok(apiEnvelope(Json.obj("notes" -> Json.toJson(notes)), responseCode = "OK"))
@@ -117,10 +106,8 @@ class NoteController @Inject()(
     }
   }
 
-  /** Update a note (replace entire note body). Caller must send full Note JSON; noteId path param is authoritative. */
   def updateNote(noteId: String): Action[JsValue] = Action.async(parse.json) { request =>
     val note = request.body.as[Note]
-    // Ensure noteId in path is set on returned object
     noteService.updateNote(noteId, note).map {
       case Some(updated) =>
         Ok(apiEnvelope(Json.obj("note" -> Json.toJson(updated)), responseCode = "OK"))
@@ -132,7 +119,6 @@ class NoteController @Inject()(
     }
   }
 
-  /** Delete a note by ID */
   def deleteNote(noteId: String): Action[AnyContent] = Action.async {
     noteService.deleteNote(noteId).map { success =>
       if (success)
