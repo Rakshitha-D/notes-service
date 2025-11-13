@@ -1,0 +1,4 @@
+POST    /notes/create        controllers.NoteController.createNote
+GET     /notes/:courseId     controllers.NoteController.getNotes(courseId: String)
+PUT     /notes/:noteId        controllers.NoteController.updateNote(noteId: String)
+DELETE  /notes/:noteId        controllers.NoteController.deleteNote(noteId: String)
