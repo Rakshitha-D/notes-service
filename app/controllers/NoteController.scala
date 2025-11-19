@@ -19,6 +19,9 @@ import org.apache.pekko.actor.typed.scaladsl.adapter._
 import org.apache.pekko.actor.typed.scaladsl.AskPattern._
 import org.apache.pekko.actor.typed.Scheduler
 import org.apache.pekko.util.Timeout
+import java.net.InetSocketAddress
+
+import utils.RedisCache
 
 @Singleton
 class NoteController @Inject()(
@@ -28,12 +31,18 @@ class NoteController @Inject()(
 
   private val typedSystem: org.apache.pekko.actor.typed.ActorSystem[Nothing] = actorSystem.toTyped
 
-  private val session: CqlSession = CqlSession.builder()
-    .withKeyspace("notes_ks")
-    .build()
+
+  val session = CqlSession.builder()
+  .addContactPoint(new InetSocketAddress("localhost", 9042))
+  .withLocalDatacenter("datacenter1")
+  .withKeyspace("notes_ks")
+  .build()
 
   private val noteDao = new NoteDao(session)
-  private val noteService = new NoteService(noteDao)
+
+  private val redisCache = new RedisCache()(actorSystem, ec)
+
+  private val noteService = new NoteService(noteDao, redisCache)
 
   private val noteActor = typedSystem.systemActorOf(
     NoteActor(noteService),

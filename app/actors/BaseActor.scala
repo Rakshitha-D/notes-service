@@ -1,7 +1,7 @@
 package actors
 
-import akka.actor.typed.scaladsl.Behaviors
-import akka.actor.typed.Behavior
+import org.apache.pekko.actor.typed.scaladsl.Behaviors
+import org.apache.pekko.actor.typed.Behavior
 import scala.concurrent.Future
 import scala.concurrent.ExecutionContext.Implicits.global
 
